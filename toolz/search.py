@@ -14,6 +14,7 @@ from toolregistry import ToolRegistry, Tool
 from toolregistry.tool_registry import TOOL_DISCOVERY_NAME
 
 from .keywords import BM25KeywordSignature, QueryExpansionSignature
+from .rerank import get_reranker, Reranker
 from .results import ToolDiscoveryResult
 
 logger = logging.getLogger(__name__)
@@ -28,8 +29,8 @@ class ToolzSearch:
     from each tool's metadata. These keywords are concatenated with raw
     metadata and indexed using bm25s.
 
-    Optionally rerank results using cosine similarity on tool descriptions
-    with a small bonus for partial name matches.
+    Optionally rerank results using pluggable strategies (cosine similarity,
+    MMR, or none).
 
     Example::
 
@@ -39,7 +40,7 @@ class ToolzSearch:
         registry = ToolRegistry()
         registry.register(read_file)
 
-        search = ToolzSearch(registry, rerank=True)
+        search = ToolzSearch(registry, rerank="cosine")
         search.build_index()
         results = search.search("read a file", top_k=5)
     """
@@ -54,11 +55,11 @@ class ToolzSearch:
         lm: dspy.LM | None = None,
         keyword_min: int = 10,
         keyword_max: int = 100,
-        rerank: bool = False,
+        rerank: str = "none",
+        reranker_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.registry = registry
         self.use_llm_query_expansion = use_llm_query_expansion
-        self.rerank = rerank
         self._bm25 = bm25s.BM25(corpus=[], **self._BM25_PARAMS)
         if lm is not None:
             dspy.configure(lm=lm)
@@ -67,6 +68,7 @@ class ToolzSearch:
         self._corpora: list[dict[str, Any]] = []
         self._keyword_min = keyword_min
         self._keyword_max = keyword_max
+        self._reranker: Reranker = get_reranker(rerank, **(reranker_kwargs or {}))
 
     @staticmethod
     def _clean_token(token: str) -> str | None:
@@ -133,7 +135,8 @@ class ToolzSearch:
         include_schema: bool = False,
         api_format: str = "openai-chat",
         use_llm_query_expansion: bool | None = None,
-        rerank: bool | None = None,
+        rerank: str | None = None,
+        reranker_kwargs: dict[str, Any] | None = None,
     ) -> list[ToolDiscoveryResult]:
         """Search for tools matching the query.
 
@@ -146,8 +149,10 @@ class ToolzSearch:
             use_llm_query_expansion: Enable LLM-based query expansion for this
                 query only.  Defaults to ``self.use_llm_query_expansion`` if
                 ``None``.
-            rerank: Enable cosine-similarity reranking for this query only.
-                Defaults to ``self.rerank`` if ``None``.
+            rerank: Reranker name for this query only (e.g. ``"cosine"``,
+                ``"mmr"``).  Defaults to ``self._reranker`` if ``None``.
+            reranker_kwargs: Passed to the reranker constructor for this
+                query only (e.g. ``{"lambda_mult": 0.8}`` for MMR).
 
         Returns:
             List of :class:`ToolDiscoveryResult` models.
@@ -173,9 +178,11 @@ class ToolzSearch:
 
         pairs = list(zip(results.documents.ravel(), results.scores.ravel()))
 
-        do_rerank = rerank if rerank is not None else self.rerank
-        if do_rerank:
-            pairs = self._rerank_results(pairs, query)
+        if rerank is not None:
+            reranker = get_reranker(rerank, **(reranker_kwargs or {}))
+            pairs = reranker.rerank(pairs, query, self.registry)
+        else:
+            pairs = self._reranker.rerank(pairs, query, self.registry)
 
         out: list[ToolDiscoveryResult] = []
         for doc, score in pairs:
@@ -225,7 +232,14 @@ class ToolzSearch:
             parts.append(f"{name} ({dtype}) {desc}".strip())
         return " ".join(parts)
 
-    def _generate_keywords(self, tool_name: str, description: str, parameters: str, tags: str, search_hint: str) -> list[str]:
+    def _generate_keywords(
+        self,
+        tool_name: str,
+        description: str,
+        parameters: str,
+        tags: str,
+        search_hint: str,
+    ) -> list[str]:
         try:
             result = self._keyword_predictor(
                 tool_name=tool_name, description=description, parameters=parameters,
@@ -256,7 +270,13 @@ class ToolzSearch:
 
         return filtered
 
-    def _expand_to_min(self, keywords: list[str], tool_name: str, description: str, parameters: str) -> list[str]:
+    def _expand_to_min(
+        self,
+        keywords: list[str],
+        tool_name: str,
+        description: str,
+        parameters: str,
+    ) -> list[str]:
         """Fill in keyword gap from raw metadata tokens."""
         seen = set(keywords)
         for token in f"{tool_name} {description} {parameters}".split():
@@ -281,7 +301,13 @@ class ToolzSearch:
         mask = [0.0 if not required_tags.issubset(set(doc.get("tags", []))) else 1.0 for doc in self._corpora]
         return np.array(mask, dtype="float32")
 
-    def _doc_to_result(self, doc: dict[str, Any], score: float, include_schema: bool, api_format: str) -> ToolDiscoveryResult:
+    def _doc_to_result(
+        self,
+        doc: dict[str, Any],
+        score: float,
+        include_schema: bool,
+        api_format: str,
+    ) -> ToolDiscoveryResult:
         tool_name = doc.get("tool_name", "")
         result = ToolDiscoveryResult(
             name=tool_name,
@@ -297,61 +323,3 @@ class ToolzSearch:
             if include_schema:
                 result.tool_schema = tool.get_schema(api_format)
         return result
-
-    def _tokenize_simple(self, text: str) -> list[str]:
-        """Tokenize text into lowercase alphabetic tokens (>= 2 chars)."""
-        return [t for t in text.lower().split() if t.isalpha() and len(t) >= 2]
-
-    def _cosine_similarity(self, a: dict[str, int], b: dict[str, int]) -> float:
-        """Compute cosine similarity between two term-frequency dicts."""
-        if not a or not b:
-            return 0.0
-        common = set(a.keys()) & set(b.keys())
-        if not common:
-            return 0.0
-        dot = sum(a[t] * b[t] for t in common)
-        na = sum(v * v for v in a.values()) ** 0.5
-        nb = sum(v * v for v in b.values()) ** 0.5
-        if na == 0 or nb == 0:
-            return 0.0
-        return dot / (na * nb)
-
-    def _rerank_results(
-        self,
-        results: list[tuple[dict[str, Any], float]],
-        query: str,
-    ) -> list[tuple[dict[str, Any], float]]:
-        """Rerank BM25 results using cosine similarity on descriptions + name-match bonus."""
-        query_tokens = self._tokenize_simple(query)
-        if not query_tokens:
-            return results
-
-        reranked: list[tuple[dict[str, Any], float]] = []
-        for doc, bm25_score in results:
-            tool_name = doc.get("tool_name", "")
-            tool = self.registry.get_tool(tool_name)
-            description = tool.description if tool and tool.description else ""
-
-            desc_tokens = self._tokenize_simple(description)
-            desc_freq: dict[str, int] = {}
-            for t in desc_tokens:
-                desc_freq[t] = desc_freq.get(t, 0) + 1
-
-            query_freq: dict[str, int] = {}
-            for t in query_tokens:
-                query_freq[t] = query_freq.get(t, 0) + 1
-
-            cos_sim = self._cosine_similarity(query_freq, desc_freq)
-            combined = bm25_score + cos_sim
-
-            # Small bonus for partial name match
-            name_lower = tool_name.lower().replace("_", " ")
-            for qt in query_tokens:
-                if qt in name_lower:
-                    combined += 0.05
-                    break
-
-            reranked.append((doc, combined))
-
-        reranked.sort(key=lambda x: x[1], reverse=True)
-        return reranked

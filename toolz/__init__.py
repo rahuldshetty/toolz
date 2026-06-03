@@ -2,6 +2,7 @@
 
 from .keywords import BM25KeywordSignature, QueryExpansionSignature
 from .llm import make_lm
+from .rerank import get_reranker
 from .results import ToolDiscoveryResult
 from .search import ToolzSearch
 
@@ -10,5 +11,6 @@ __all__ = [
     "QueryExpansionSignature",
     "ToolDiscoveryResult",
     "ToolzSearch",
+    "get_reranker",
     "make_lm",
 ]

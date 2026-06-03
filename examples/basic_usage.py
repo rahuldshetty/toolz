@@ -43,7 +43,7 @@ def main() -> None:
     registry.register(calculate_expression, name="calculate_expression")
     print("No. of Tools in Registry:", len(registry._tools))
 
-    search = ToolzSearch(registry, keyword_min=10, keyword_max=30, lm=lm, rerank=True)
+    search = ToolzSearch(registry, keyword_min=10, keyword_max=30, lm=lm, rerank="cosine")
     search.build_index()
 
     print("\nIndexed corpus:\n")
@@ -74,7 +74,7 @@ def main() -> None:
         print(f"  {r.name:20s} score={r.score:.3f}")
 
     print("\n\n--- With reranking (cosine similarity + name match) ---")
-    results = search.search("store results into disk drive", top_k=5, rerank=True)
+    results = search.search("store results into disk drive", top_k=5, rerank="cosine")
     print("Search Query: store results into disk drive")
     for r in results:
         print(f"  {r.name:20s} score={r.score:.3f}")

@@ -1,31 +1,19 @@
 """Demo: BM25-only vs BM25 + cosine-sim reranking.
 
-Shows how reranking changes scores and ordering by comparing both
-modes side-by-side on the same query.
+Shows how different reranking strategies change scores and ordering
+by comparing them side-by-side on the same query.
 
 Run without an LLM configured — falls back to keyword backfilling.
 """
-from dotenv import load_dotenv
-from toolz.llm import make_lm
 
 import logging
-
-from toolregistry import ToolRegistry
-from toolz import ToolzSearch
 
 # Suppress LLM fallback warnings for cleaner demo output
 logging.getLogger("toolz.search").setLevel(logging.ERROR)
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
-load_dotenv()
-
-try:
-    lm = make_lm()
-    print(f"LLM configured: {lm.model if lm else 'None'}")
-except ValueError:
-    lm = None
-    print("LLM not configured — BM25-only fallback")
-
+from toolregistry import ToolRegistry
+from toolz import ToolzSearch
 
 registry = ToolRegistry()
 
@@ -60,7 +48,7 @@ registry.register(
     description="Download and return the HTML content of a web page at the given URL.",
 )
 
-search = ToolzSearch(registry, keyword_min=5, keyword_max=30, lm=lm)
+search = ToolzSearch(registry, keyword_min=5, keyword_max=20)
 search.build_index()
 
 print("\nIndexed tools and their generated keywords:")
@@ -79,22 +67,32 @@ for query in queries:
     print(f"Query: {query!r}")
     print(f"{'='*60}")
 
-    # BM25-only
-    results_bm25 = search.search(query, top_k=6, use_llm_query_expansion=False)
-    print("\nBM25 only:")
+    # BM25 only (noop reranker)
+    results_bm25 = search.search(query, top_k=6, rerank="none")
+    print("\nBM25 only (rerank=none):")
     for i, r in enumerate(results_bm25, 1):
         print(f"  {i:2d}. {r.name:20s} score={r.score:.4f}")
 
-    # BM25 + reranking
-    results_rerank = search.search(query, top_k=6, use_llm_query_expansion=False, rerank=True)
-    print("\nBM25 + cosine similarity reranking:")
-    for i, r in enumerate(results_rerank, 1):
+    # Cosine similarity reranking
+    results_cosine = search.search(query, top_k=6, rerank="cosine")
+    print("\nBM25 + cosine similarity:")
+    for i, r in enumerate(results_cosine, 1):
         print(f"  {i:2d}. {r.name:20s} score={r.score:.4f}")
 
-    # Show which results changed position
+    # MMR reranking (lambda=0.7 relevance, 0.3 diversity)
+    results_mmr = search.search(query, top_k=6, rerank="mmr", reranker_kwargs={"lambda_mult": 0.7})
+    print("\nBM25 + MMR (lambda=0.7):")
+    for i, r in enumerate(results_mmr, 1):
+        print(f"  {i:2d}. {r.name:20s} score={r.score:.4f}")
+
+    # Compare ordering
     bm25_names = [r.name for r in results_bm25]
-    rerank_names = [r.name for r in results_rerank]
-    if bm25_names != rerank_names:
-        print("\n  >>> Ordering changed by reranking!")
-    else:
-        print("\n  (Ordering unchanged — BM25 already ranked correctly)")
+    cosine_names = [r.name for r in results_cosine]
+    mmr_names = [r.name for r in results_mmr]
+
+    if bm25_names != cosine_names:
+        print("\n  >>> Cosine changed the ordering!")
+    if bm25_names != mmr_names:
+        print("  >>> MMR changed the ordering!")
+    if bm25_names == cosine_names == mmr_names:
+        print("\n  (All strategies agree on ordering)")
