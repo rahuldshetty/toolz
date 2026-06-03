@@ -15,9 +15,10 @@ class BM25KeywordSignature(dspy.Signature):
     search_hint: str = dspy.InputField(desc="Existing search hint or free-form keywords")
     keywords: list[str] = dspy.OutputField(
         desc=(
-            "BM25-relevant keywords and synonyms. Include the tool name split into words, "
-            "action verbs, domain terms, parameter-related terms, and common user phrasings. "
-            "Lowercase only, no duplicates, no punctuation."
+            "BM25-relevant keywords and synonyms. Include the tool name split "
+            "into words, action verbs, domain terms, parameter-related terms, "
+            "and common user phrasings. Lowercase only, no duplicates, no "
+            "punctuation. Generate a rich, diverse set of keywords."
         )
     )
 

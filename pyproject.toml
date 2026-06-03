@@ -8,6 +8,7 @@ dependencies = [
     "bm25s[core]>=0.3.9",
     "dspy>=3.2.1",
     "openai>=2.39.0",
+    "python-dotenv>=1.0.0",
     "toolregistry>=0.11.1",
 ]
 

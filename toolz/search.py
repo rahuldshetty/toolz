@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -13,6 +14,8 @@ from toolregistry.tool_registry import TOOL_DISCOVERY_NAME
 
 from .keywords import BM25KeywordSignature, QueryExpansionSignature
 from .results import ToolDiscoveryResult
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["ToolzSearch"]
 
@@ -44,16 +47,22 @@ class ToolzSearch:
         registry: ToolRegistry,
         use_llm_query_expansion: bool = False,
         lm: dspy.LM | None = None,
+        keyword_min: int = 10,
+        keyword_max: int = 100,
     ) -> None:
         self.registry = registry
         self.use_llm_query_expansion = use_llm_query_expansion
         self._bm25 = bm25s.BM25(k1=1.5, b=0.75, delta=0.5, method="lucene", corpus=[])
         self._lm = lm
-        self._keyword_predictor = dspy.Predict(BM25KeywordSignature, lm=lm)
-        self._query_predictor = dspy.Predict(QueryExpansionSignature, lm=lm)
+        if lm is not None:
+            dspy.configure(lm=lm)
+        self._keyword_predictor = dspy.Predict(BM25KeywordSignature)
+        self._query_predictor = dspy.Predict(QueryExpansionSignature)
         self._tokenize = bm25s.tokenize
         self._corpora: list[dict[str, Any]] = []
         self._indexed: bool = False
+        self._keyword_min = keyword_min
+        self._keyword_max = keyword_max
 
     def build_index(self) -> None:
         """Build the BM25 index from all tools in the registry."""
@@ -114,6 +123,7 @@ class ToolzSearch:
         tags: Sequence[str] | None = None,
         include_schema: bool = False,
         api_format: str = "openai-chat",
+        use_llm_query_expansion: bool | None = None,
     ) -> list[ToolDiscoveryResult]:
         """Search for tools matching the query.
 
@@ -123,6 +133,9 @@ class ToolzSearch:
             tags: Optional tags to filter results (all must match).
             include_schema: Include full tool schema in results.
             api_format: API format for tool schema generation.
+            use_llm_query_expansion: Enable LLM-based query expansion for this
+                query only.  Defaults to ``self.use_llm_query_expansion`` if
+                ``None``.
 
         Returns:
             List of :class:`ToolDiscoveryResult` models.
@@ -130,7 +143,8 @@ class ToolzSearch:
         if not self._indexed:
             self.build_index()
 
-        if self.use_llm_query_expansion:
+        expand = use_llm_query_expansion if use_llm_query_expansion is not None else self.use_llm_query_expansion
+        if expand:
             expanded = self._generate_keywords_for_query(query)
             query_texts = [expanded]
         else:
@@ -157,6 +171,30 @@ class ToolzSearch:
                 dict(doc), float(score), include_schema=include_schema, api_format=api_format,
             ))
         return out
+
+    def inspect_index(self) -> list[dict[str, Any]]:
+        """Return the full indexed corpus for debugging.
+
+        Each entry is a dict with:
+
+        - **tool_name**: Registered name of the tool.
+        - **namespace**: Optional namespace.
+        - **keywords**: Space-separated LLM-generated keywords.
+        - **raw**: Concatenated raw metadata text.
+        - **tags**: List of tags.
+
+        Returns:
+            List of dicts, one per indexed tool.
+
+        Example::
+
+            for doc in search.inspect_index():
+                print(f"{doc['tool_name']}: {doc['keywords'][:10]}...")
+        """
+        if not self._indexed:
+            self.build_index()
+
+        return [dict(doc) for doc in self._corpora]
 
     def save(self, path: str | Path) -> None:
         """Save the BM25 index and corpus to disk."""
@@ -190,9 +228,12 @@ class ToolzSearch:
                 tags=tags, search_hint=search_hint,
             )
             keywords = result.keywords if hasattr(result, "keywords") else []
+            logger.info("Generated %d raw keywords for tool '%s'", len(keywords), tool_name)
         except Exception:
+            logger.warning("LLM keyword generation failed for tool '%s'", tool_name, exc_info=True)
             keywords = []
 
+        # Deduplicate and clean
         seen: set[str] = set()
         filtered: list[str] = []
         for kw in keywords:
@@ -200,7 +241,28 @@ class ToolzSearch:
             if clean and clean.isalpha() and len(clean) >= 2 and clean not in seen:
                 seen.add(clean)
                 filtered.append(clean)
+
+        # Enforce max: trim to keyword_max
+        if len(filtered) > self._keyword_max:
+            filtered = filtered[: self._keyword_max]
+
+        # Enforce min: if LLM under-generates, expand from raw metadata
+        if len(filtered) < self._keyword_min:
+            filtered = self._expand_to_min(filtered, tool_name, description, parameters)
+
         return filtered
+
+    def _expand_to_min(self, keywords: list[str], tool_name: str, description: str, parameters: str) -> list[str]:
+        """Fill in keyword gap from raw metadata tokens."""
+        seen = set(keywords)
+        for token in f"{tool_name} {description} {parameters}".split():
+            if len(keywords) >= self._keyword_min:
+                break
+            clean = token.lower().strip().strip(".,;:!?\"'()[]{}")
+            if clean and clean.isalpha() and len(clean) >= 2 and clean not in seen:
+                seen.add(clean)
+                keywords.append(clean)
+        return keywords
 
     def _generate_keywords_for_query(self, query: str) -> str:
         try:
