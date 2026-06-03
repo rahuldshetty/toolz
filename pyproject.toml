@@ -1,9 +1,9 @@
 [project]
 name = "toolz"
 version = "0.1.0"
-description = "Add your description here"
+description = "LLM-enhanced BM25 tool discovery over a ToolRegistry"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "bm25s[core]>=0.3.9",
     "dspy>=3.2.1",
