@@ -14,7 +14,6 @@ class ToolDiscoveryResult(BaseModel):
     description: str
     score: float
     namespace: Optional[str] = None
-    deferred: bool = False
     keywords: list[str] = []
     tags: list[str] = []
     tool_schema: Optional[dict[str, Any]] = None

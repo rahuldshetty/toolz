@@ -85,7 +85,6 @@ class ToolzSearch:
                 "raw": f"{tool_name} {description} {param_str} {tags_str}",
                 "tags": list(tool.metadata.all_tags) if tool.metadata else [],
                 "namespace": tool.namespace,
-                "deferred": bool(tool.metadata.defer) if tool.metadata else False,
             })
 
         if not self._corpora:
@@ -224,7 +223,6 @@ class ToolzSearch:
             description="",
             score=score,
             namespace=doc.get("namespace"),
-            deferred=doc.get("deferred", False),
             keywords=doc.get("keywords", "").split() if doc.get("keywords") else [],
             tags=doc.get("tags", []),
         )
