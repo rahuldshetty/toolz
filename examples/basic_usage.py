@@ -36,6 +36,8 @@ search_queries = [
     "read a file from disk",
     "weather forecast",
     "what's the temperature in Antarctica",
+    "Is it raining in UK",
+    "store results into disk drive"
 ]
 
 
@@ -70,7 +72,7 @@ def main() -> None:
 
     # 2. Create a search instance with keyword_min=10, keyword_max=100
     #    The LLM generates freely; we trim to max and backfill to min.
-    search = ToolzSearch(registry, keyword_min=10, keyword_max=40, lm=lm)
+    search = ToolzSearch(registry, keyword_min=10, keyword_max=30, lm=lm)
 
     # 3. Build the BM25 index (calls LLM to generate keywords per tool)
     search.build_index()
@@ -93,8 +95,8 @@ def main() -> None:
 
     # 6. Search without LLM expansion (direct BM25 on raw query)
     print("\n\n--- Without LLM query expansion ---")
-    results = search.search("read a file from disk", top_k=5, use_llm_query_expansion=False)
-    print("Search Query: read a file from disk")
+    results = search.search("store results into disk drive", top_k=5, use_llm_query_expansion=False)
+    print("Search Query: store results into disk drive")
     for r in results:
         print(f"  {r.name:20s} score={r.score:.3f}")
 
