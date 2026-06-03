@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 import bm25s
 import dspy
+import numpy as np
 
 from toolregistry import ToolRegistry, Tool
 from toolregistry.tool_registry import TOOL_DISCOVERY_NAME
@@ -41,6 +42,7 @@ class ToolzSearch:
     """
 
     _KEYWORD_BOOST = 3
+    _BM25_PARAMS = dict(k1=1.5, b=0.75, delta=0.5, method="lucene")
 
     def __init__(
         self,
@@ -52,17 +54,22 @@ class ToolzSearch:
     ) -> None:
         self.registry = registry
         self.use_llm_query_expansion = use_llm_query_expansion
-        self._bm25 = bm25s.BM25(k1=1.5, b=0.75, delta=0.5, method="lucene", corpus=[])
-        self._lm = lm
+        self._bm25 = bm25s.BM25(corpus=[], **self._BM25_PARAMS)
         if lm is not None:
             dspy.configure(lm=lm)
         self._keyword_predictor = dspy.Predict(BM25KeywordSignature)
         self._query_predictor = dspy.Predict(QueryExpansionSignature)
-        self._tokenize = bm25s.tokenize
         self._corpora: list[dict[str, Any]] = []
-        self._indexed: bool = False
         self._keyword_min = keyword_min
         self._keyword_max = keyword_max
+
+    @staticmethod
+    def _clean_token(token: str) -> str | None:
+        """Clean a token into a keyword, or return None if invalid."""
+        clean = token.lower().strip().strip(".,;:!?\"'()[]{}")
+        if clean and clean.isalpha() and 2 <= len(clean) <= 50:
+            return clean
+        return None
 
     def build_index(self) -> None:
         """Build the BM25 index from all tools in the registry."""
@@ -97,8 +104,7 @@ class ToolzSearch:
             })
 
         if not self._corpora:
-            self._bm25 = bm25s.BM25(k1=1.5, b=0.75, delta=0.5, method="lucene", corpus=[])
-            self._indexed = True
+            self._bm25 = bm25s.BM25(corpus=[], **self._BM25_PARAMS)
             return
 
         indexed_texts = []
@@ -110,11 +116,9 @@ class ToolzSearch:
                 " ".join([boosted_kw] * self._KEYWORD_BOOST + [raw]) if boosted_kw else raw
             )
 
-        tokenized = self._tokenize(indexed_texts, return_ids=False, show_progress=False)
-
-        self._bm25 = bm25s.BM25(k1=1.5, b=0.75, delta=0.5, method="lucene", corpus=self._corpora)
+        tokenized = bm25s.tokenize(indexed_texts, return_ids=False, show_progress=False)
+        self._bm25 = bm25s.BM25(corpus=self._corpora, **self._BM25_PARAMS)
         self._bm25.index(tokenized)
-        self._indexed = True
 
     def search(
         self,
@@ -140,22 +144,16 @@ class ToolzSearch:
         Returns:
             List of :class:`ToolDiscoveryResult` models.
         """
-        if not self._indexed:
-            self.build_index()
+        self.build_index()
 
         expand = use_llm_query_expansion if use_llm_query_expansion is not None else self.use_llm_query_expansion
-        if expand:
-            expanded = self._generate_keywords_for_query(query)
-            query_texts = [expanded]
-        else:
-            query_texts = [query]
+        query_texts = [self._generate_keywords_for_query(query)] if expand else [query]
 
-        query_tokens = self._tokenize(query_texts, return_ids=False, show_progress=False)
-
+        query_tokens = bm25s.tokenize(query_texts, return_ids=False, show_progress=False)
         weight_mask = self._build_tag_mask(set(tags)) if tags else None
 
         corpus_size = self._bm25.scores["num_docs"]
-        k = min(top_k, corpus_size) if corpus_size > 0 else 0
+        k = min(top_k, corpus_size) if corpus_size else 0
 
         results = self._bm25.retrieve(
             query_tokens,
@@ -185,15 +183,8 @@ class ToolzSearch:
 
         Returns:
             List of dicts, one per indexed tool.
-
-        Example::
-
-            for doc in search.inspect_index():
-                print(f"{doc['tool_name']}: {doc['keywords'][:10]}...")
         """
-        if not self._indexed:
-            self.build_index()
-
+        self.build_index()
         return [dict(doc) for doc in self._corpora]
 
     def save(self, path: str | Path) -> None:
@@ -207,7 +198,6 @@ class ToolzSearch:
         instance = cls(registry=registry)
         instance._bm25 = bm25_obj
         instance._corpora = list(bm25_obj.corpus) if bm25_obj.corpus else []
-        instance._indexed = True
         return instance
 
     def _extract_param_info(self, tool: Tool) -> str:
@@ -237,16 +227,16 @@ class ToolzSearch:
         seen: set[str] = set()
         filtered: list[str] = []
         for kw in keywords:
-            clean = kw.lower().strip().strip(".,;:!?\"'()[]{}")
-            if clean and clean.isalpha() and len(clean) >= 2 and clean not in seen:
+            clean = self._clean_token(kw)
+            if clean and clean not in seen:
                 seen.add(clean)
                 filtered.append(clean)
 
-        # Enforce max: trim to keyword_max
+        # Trim to max
         if len(filtered) > self._keyword_max:
             filtered = filtered[: self._keyword_max]
 
-        # Enforce min: if LLM under-generates, expand from raw metadata
+        # Backfill from raw metadata if under minimum
         if len(filtered) < self._keyword_min:
             filtered = self._expand_to_min(filtered, tool_name, description, parameters)
 
@@ -258,8 +248,8 @@ class ToolzSearch:
         for token in f"{tool_name} {description} {parameters}".split():
             if len(keywords) >= self._keyword_min:
                 break
-            clean = token.lower().strip().strip(".,;:!?\"'()[]{}")
-            if clean and clean.isalpha() and len(clean) >= 2 and clean not in seen:
+            clean = self._clean_token(token)
+            if clean and clean not in seen:
                 seen.add(clean)
                 keywords.append(clean)
         return keywords
@@ -275,7 +265,6 @@ class ToolzSearch:
         if not self._corpora:
             return None
         mask = [0.0 if not required_tags.issubset(set(doc.get("tags", []))) else 1.0 for doc in self._corpora]
-        import numpy as np
         return np.array(mask, dtype="float32")
 
     def _doc_to_result(self, doc: dict[str, Any], score: float, include_schema: bool, api_format: str) -> ToolDiscoveryResult:
