@@ -3,9 +3,9 @@
 Factory to create a ``dspy.LM`` from environment variables.
 
 Environment variables:
-    OPENAI_API_KEY   – API key (required).
-    OPENAI_BASE_URL  – Base URL (optional, e.g. ``http://localhost:1234/v1``).
-    OPENAI_MODEL_NAME – Model name (required).
+    OPENAI_API_KEY   - API key (required).
+    OPENAI_BASE_URL  - Base URL (optional, e.g. ``http://localhost:1234/v1``).
+    OPENAI_MODEL_NAME - Model name (required).
 """
 
 from __future__ import annotations
