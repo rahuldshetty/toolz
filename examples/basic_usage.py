@@ -43,7 +43,9 @@ def main() -> None:
     registry.register(calculate_expression, name="calculate_expression")
     print("No. of Tools in Registry:", len(registry._tools))
 
-    search = ToolzSearch(registry, keyword_min=10, keyword_max=30, lm=lm, rerank="cosine")
+    # Example: pass extra_keywords to supplement LLM-generated keywords
+    extra = "cat head tail less more view open"
+    search = ToolzSearch(registry, keyword_min=10, keyword_max=30, extra_keywords=extra, lm=lm, rerank="cosine")
     search.build_index()
 
     print("\nIndexed corpus:\n")

@@ -55,6 +55,7 @@ class ToolzSearch:
         lm: dspy.LM | None = None,
         keyword_min: int = 10,
         keyword_max: int = 100,
+        extra_keywords: str = "",
         rerank: str = "none",
         reranker_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -68,7 +69,19 @@ class ToolzSearch:
         self._corpora: list[dict[str, Any]] = []
         self._keyword_min = keyword_min
         self._keyword_max = keyword_max
+        self._extra_keywords = extra_keywords
         self._reranker: Reranker = get_reranker(rerank, **(reranker_kwargs or {}))
+        self._index_built: bool = False
+
+    @property
+    def keyword_min(self) -> int:
+        """Minimum number of keywords to generate per tool."""
+        return self._keyword_min
+
+    @property
+    def keyword_max(self) -> int:
+        """Maximum number of keywords to generate per tool."""
+        return self._keyword_max
 
     @staticmethod
     def _clean_token(token: str) -> str | None:
@@ -80,6 +93,8 @@ class ToolzSearch:
 
     def build_index(self) -> None:
         """Build the BM25 index from all tools in the registry."""
+        if self._index_built and self._corpora:
+            return
         self._corpora = []
 
         for name, tool in self.registry._tools.items():
@@ -100,6 +115,7 @@ class ToolzSearch:
                 parameters=param_str,
                 tags=tags_str,
                 search_hint=search_hint,
+                extra_keywords=self._extra_keywords,
             )
 
             self._corpora.append({
@@ -126,6 +142,7 @@ class ToolzSearch:
         tokenized = bm25s.tokenize(indexed_texts, return_ids=False, show_progress=False)
         self._bm25 = bm25s.BM25(corpus=self._corpora, **self._BM25_PARAMS)
         self._bm25.index(tokenized)
+        self._index_built = True
 
     def search(
         self,
@@ -219,6 +236,7 @@ class ToolzSearch:
         instance = cls(registry=registry)
         instance._bm25 = bm25_obj
         instance._corpora = list(bm25_obj.corpus) if bm25_obj.corpus else []
+        instance._index_built = True
         return instance
 
     def _extract_param_info(self, tool: Tool) -> str:
@@ -239,13 +257,16 @@ class ToolzSearch:
         parameters: str,
         tags: str,
         search_hint: str,
+        extra_keywords: str,
     ) -> list[str]:
         try:
             result = self._keyword_predictor(
                 tool_name=tool_name, description=description, parameters=parameters,
-                tags=tags, search_hint=search_hint,
+                tags=tags, search_hint=search_hint, extra_keywords=extra_keywords,
             )
-            keywords = result.keywords if hasattr(result, "keywords") else []
+            # Extract from Pydantic KeywordList model
+            kw_list = result.keywords if hasattr(result, "keywords") else None
+            keywords = kw_list.items if kw_list is not None else []
             logger.info("Generated %d raw keywords for tool '%s'", len(keywords), tool_name)
         except Exception:
             logger.warning("LLM keyword generation failed for tool '%s'", tool_name, exc_info=True)
@@ -264,29 +285,7 @@ class ToolzSearch:
         if len(filtered) > self._keyword_max:
             filtered = filtered[: self._keyword_max]
 
-        # Backfill from raw metadata if under minimum
-        if len(filtered) < self._keyword_min:
-            filtered = self._expand_to_min(filtered, tool_name, description, parameters)
-
         return filtered
-
-    def _expand_to_min(
-        self,
-        keywords: list[str],
-        tool_name: str,
-        description: str,
-        parameters: str,
-    ) -> list[str]:
-        """Fill in keyword gap from raw metadata tokens."""
-        seen = set(keywords)
-        for token in f"{tool_name} {description} {parameters}".split():
-            if len(keywords) >= self._keyword_min:
-                break
-            clean = self._clean_token(token)
-            if clean and clean not in seen:
-                seen.add(clean)
-                keywords.append(clean)
-        return keywords
 
     def _generate_keywords_for_query(self, query: str) -> str:
         try:

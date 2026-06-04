@@ -48,7 +48,7 @@ registry.register(
     description="Download and return the HTML content of a web page at the given URL.",
 )
 
-search = ToolzSearch(registry, keyword_min=5, keyword_max=20)
+search = ToolzSearch(registry)
 search.build_index()
 
 print("\nIndexed tools and their generated keywords:")
